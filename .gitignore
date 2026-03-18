@@ -1,0 +1,7 @@
+.idea
+.terraform/
+.claude/
+
+dist/
+
+aws_account_prep/terraform.tfvars
