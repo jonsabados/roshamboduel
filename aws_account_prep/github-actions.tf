@@ -1,0 +1,179 @@
+# GitHub Actions OIDC Provider and IAM Role for CI/CD
+
+resource "aws_iam_openid_connect_provider" "github" {
+  url             = "https://token.actions.githubusercontent.com"
+  client_id_list  = ["sts.amazonaws.com"]
+  thumbprint_list = ["ffffffffffffffffffffffffffffffffffffffff"] # GitHub's OIDC doesn't require thumbprint validation
+}
+
+data "aws_iam_policy_document" "github_actions_assume_role" {
+  statement {
+    effect  = "Allow"
+    actions = ["sts:AssumeRoleWithWebIdentity"]
+
+    principals {
+      type        = "Federated"
+      identifiers = [aws_iam_openid_connect_provider.github.arn]
+    }
+
+    condition {
+      test     = "StringEquals"
+      variable = "token.actions.githubusercontent.com:aud"
+      values   = ["sts.amazonaws.com"]
+    }
+
+    condition {
+      test     = "StringLike"
+      variable = "token.actions.githubusercontent.com:sub"
+      values   = [
+        "repo:jonsabados/roshamboduel:ref:refs/tags/*",
+        "repo:jonsabados/roshamboduel:ref:refs/heads/main",
+        "repo:jonsabados/roshamboduel:pull_request",
+      ]
+    }
+  }
+}
+
+resource "aws_iam_role" "github_actions" {
+  name               = "github-actions-roshamboduel-deploy"
+  assume_role_policy = data.aws_iam_policy_document.github_actions_assume_role.json
+}
+
+data "aws_iam_policy_document" "github_actions_permissions" {
+  # Terraform state access
+  statement {
+    sid    = "TerraformStateAccess"
+    effect = "Allow"
+    actions = [
+      "s3:GetObject",
+      "s3:PutObject",
+      "s3:DeleteObject",
+      "s3:ListBucket",
+    ]
+    resources = [
+      "arn:aws:s3:::${var.state_bucket}",
+      "arn:aws:s3:::${var.state_bucket}/*",
+    ]
+  }
+
+  # Lambda management
+  statement {
+    sid    = "LambdaManagement"
+    effect = "Allow"
+    actions = [
+      "lambda:*",
+    ]
+    resources = ["*"]
+  }
+
+  # API Gateway management
+  statement {
+    sid    = "APIGatewayManagement"
+    effect = "Allow"
+    actions = [
+      "apigateway:*",
+    ]
+    resources = ["*"]
+  }
+
+  # DynamoDB management
+  statement {
+    sid    = "DynamoDBManagement"
+    effect = "Allow"
+    actions = [
+      "dynamodb:*",
+    ]
+    resources = ["*"]
+  }
+
+  # S3 management (for frontend buckets)
+  statement {
+    sid    = "S3Management"
+    effect = "Allow"
+    actions = [
+      "s3:*",
+    ]
+    resources = ["*"]
+  }
+
+  # CloudFront management
+  statement {
+    sid    = "CloudFrontManagement"
+    effect = "Allow"
+    actions = [
+      "cloudfront:*",
+    ]
+    resources = ["*"]
+  }
+
+  # Route53 management
+  statement {
+    sid    = "Route53Management"
+    effect = "Allow"
+    actions = [
+      "route53:*",
+    ]
+    resources = ["*"]
+  }
+
+  # ACM certificate management
+  statement {
+    sid    = "ACMManagement"
+    effect = "Allow"
+    actions = [
+      "acm:*",
+    ]
+    resources = ["*"]
+  }
+
+  # IAM management (for Lambda execution roles)
+  statement {
+    sid    = "IAMManagement"
+    effect = "Allow"
+    actions = [
+      "iam:*",
+    ]
+    resources = ["*"]
+  }
+
+  # CloudWatch Logs management
+  statement {
+    sid    = "CloudWatchLogsManagement"
+    effect = "Allow"
+    actions = [
+      "logs:*",
+    ]
+    resources = ["*"]
+  }
+
+  # X-Ray for tracing
+  statement {
+    sid    = "XRayManagement"
+    effect = "Allow"
+    actions = [
+      "xray:*",
+    ]
+    resources = ["*"]
+  }
+
+  # CloudWatch for dashboards/alarms
+  statement {
+    sid    = "CloudWatchManagement"
+    effect = "Allow"
+    actions = [
+      "cloudwatch:*",
+    ]
+    resources = ["*"]
+  }
+}
+
+resource "aws_iam_role_policy" "github_actions" {
+  name   = "github-actions-roshamboduel-deploy-policy"
+  role   = aws_iam_role.github_actions.id
+  policy = data.aws_iam_policy_document.github_actions_permissions.json
+}
+
+output "github_actions_role_arn" {
+  value       = aws_iam_role.github_actions.arn
+  description = "ARN of the IAM role for GitHub Actions to assume"
+}

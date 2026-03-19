@@ -1,7 +1,21 @@
 .idea
+*.iml
 .terraform/
 .claude/
 
 dist/
+node_modules/
 
-aws_account_prep/terraform.tfvars
+# Coverage
+coverage.out
+coverage/
+
+# Frontend build
+frontend/dist/
+frontend/test-report.xml
+
+# Terraform
+terraform.tfvars
+terraform/terraform.tfvars
+*.tfstate
+*.tfstate.backup
