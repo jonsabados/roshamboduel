@@ -1,0 +1,181 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test-backend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+
+      - name: Run tests
+        run: make ci-test
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: coverage.out
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  test-frontend:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        run: cd frontend && npm ci
+
+      - name: Run tests
+        run: make ci-test-frontend
+
+      - name: Upload coverage
+        uses: codecov/codecov-action@v4
+        with:
+          files: frontend/coverage/lcov.info
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  build:
+    runs-on: ubuntu-latest
+    needs: [test-backend, test-frontend]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+
+      - name: Build Lambda
+        run: make build
+
+  terraform-plan:
+    runs-on: ubuntu-latest
+    needs: [build]
+    if: github.event_name == 'pull_request'
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    env:
+      AWS_REGION: us-east-1
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT }}:role/github-actions-roshamboduel-deploy
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.25.8'
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Build Lambda
+        run: make build
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -backend-config="bucket=${{ secrets.STATE_BUCKET }}"
+
+      - name: Terraform Plan (dev)
+        id: plan-dev
+        working-directory: terraform
+        run: |
+          terraform workspace select dev || terraform workspace new dev
+          terraform plan -no-color -out=tfplan-dev
+        continue-on-error: true
+
+      - name: Terraform Plan (prod)
+        id: plan-prod
+        working-directory: terraform
+        run: |
+          terraform workspace select default
+          terraform plan -no-color -out=tfplan-prod
+        continue-on-error: true
+
+      - name: Post Plan to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { execSync } = require('child_process');
+
+            const devPlan = execSync('terraform -chdir=terraform workspace select dev && terraform -chdir=terraform show -no-color tfplan-dev', { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
+            const prodPlan = execSync('terraform -chdir=terraform workspace select default && terraform -chdir=terraform show -no-color tfplan-prod', { encoding: 'utf-8', maxBuffer: 10 * 1024 * 1024 });
+
+            const devOutcome = '${{ steps.plan-dev.outcome }}';
+            const prodOutcome = '${{ steps.plan-prod.outcome }}';
+
+            const body = `## Terraform Plan
+
+            ### Dev Environment ${devOutcome === 'success' ? '✅' : '❌'}
+
+            <details>
+            <summary>Show Plan</summary>
+
+            \`\`\`hcl
+            ${devPlan.length > 60000 ? devPlan.substring(0, 60000) + '\n... (truncated)' : devPlan}
+            \`\`\`
+
+            </details>
+
+            ### Production Environment ${prodOutcome === 'success' ? '✅' : '❌'}
+
+            <details>
+            <summary>Show Plan</summary>
+
+            \`\`\`hcl
+            ${prodPlan.length > 60000 ? prodPlan.substring(0, 60000) + '\n... (truncated)' : prodPlan}
+            \`\`\`
+
+            </details>
+            `;
+
+            // Find existing comment to update
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const botComment = comments.find(c => c.user.type === 'Bot' && c.body.includes('## Terraform Plan'));
+
+            if (botComment) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: botComment.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
